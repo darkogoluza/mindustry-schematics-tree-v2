@@ -14,7 +14,7 @@ export class DrillBuilder {
     if (size < 1) throw new Error(`size must be >= 1, got ${size}`);
     this.data.id = id;
     this.data.name = name;
-    this.data.icon = `icons/${id}.png`;
+    this.data.icon = `/icons/${id}.png`;
     this.data.size = size;
   }
 

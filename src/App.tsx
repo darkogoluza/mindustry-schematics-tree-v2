@@ -1,9 +1,7 @@
-function App() {
+import { CatalogPage } from "@/components/catalog/CatalogPage";
 
-  return (
-    <>
-    </>
-  )
+function App() {
+  return <CatalogPage />;
 }
 
 export default App

@@ -7,7 +7,7 @@ export class LiquidBuilder {
   private constructor(id: LiquidId, name: string, color: string) {
     this.data.id = id;
     this.data.name = name;
-    this.data.icon = `icons/${id}.png`;
+    this.data.icon = `/icons/${id}.png`;
     this.data.color = color;
   }
 
