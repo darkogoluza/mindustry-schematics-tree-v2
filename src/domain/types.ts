@@ -78,3 +78,49 @@ export interface Drill {
   readonly boost?: Boost;
   readonly mines: Readonly<Partial<Record<ItemId, number>>>;
 }
+
+export interface Belt {
+  readonly id: string;
+  readonly name: string;
+  readonly icon: string;
+  readonly size: number;
+  readonly health: number;
+  readonly buildTime: number;
+  readonly buildCost: readonly BuildCostEntry[];
+  readonly itemCapacity: number;
+  /** Throughput in items/second. */
+  readonly moveSpeed: number;
+}
+
+/** A continuous item draw (not a per-craft amount) — e.g. what an Overdrive Dome needs to keep running. */
+export interface OverdriveInput {
+  readonly itemId: ItemId;
+  readonly rate: number;
+}
+
+export interface OverdriveBooster {
+  readonly itemId: ItemId;
+  readonly rate: number;
+  /** Additive, stacks on top of the overdrive's base speedIncrease. */
+  readonly bonusSpeedIncrease: number;
+  readonly bonusRange: number;
+}
+
+export interface Overdrive {
+  readonly id: string;
+  readonly name: string;
+  readonly icon: string;
+  readonly size: number;
+  readonly health: number;
+  readonly power: number;
+  readonly buildTime: number;
+  readonly buildCost: readonly BuildCostEntry[];
+  readonly itemCapacity: number;
+  /** Additive speed bonus, e.g. 0.5 for +50%. */
+  readonly speedIncrease: number;
+  readonly range: number;
+  /** Items the overdrive continuously needs just to stay active (empty for the Projector). */
+  readonly requiredInputs: readonly OverdriveInput[];
+  /** Optional item draw that further boosts speed/range beyond the base (Projector only). */
+  readonly booster?: OverdriveBooster;
+}

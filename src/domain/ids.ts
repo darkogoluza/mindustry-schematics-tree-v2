@@ -17,7 +17,7 @@ export const ITEM_IDS = [
   "pyratite",
 ] as const;
 
-export const LIQUID_IDS = ["water", "slag", "oil"] as const;
+export const LIQUID_IDS = ["water", "slag", "oil", "cryofluid"] as const;
 
 export type ItemId = (typeof ITEM_IDS)[number];
 export type LiquidId = (typeof LIQUID_IDS)[number];

@@ -112,13 +112,6 @@ export const factories: readonly Factory[] = assertUniqueIds("factory", [
     .outputs(liquidFlow("water")(6.6))
     .build(),
 
-  factory("vent-condenser")("Vent Condenser")(3)
-    .power(30)
-    .note("Needs steam vents")
-    .buildCost(cost("graphite")(20))
-    .outputs(liquidFlow("water")(30))
-    .build(),
-
   factory("oil-extractor")("Oil Extractor")(3)
     .power(180)
     .craftTime(1)
