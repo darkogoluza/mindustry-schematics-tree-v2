@@ -1,6 +1,6 @@
-import type { ItemId, LiquidId } from "./types";
-import { drills } from "./data/drills.data";
-import { requireBelt } from "./utils/belt-lookup";
+import type { ItemId, LiquidId } from "../types";
+import { drills } from "../data/drills.data";
+import { requireBelt } from "./belt-lookup";
 
 export interface CoolingOption {
   /** false = base mining rate; true = boosted (e.g. water-cooled, or graphite-fed for crushers). */

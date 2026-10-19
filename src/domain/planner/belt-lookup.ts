@@ -1,4 +1,5 @@
 import { belts } from "../data/belts.data";
+
 import type { Belt } from "../types";
 
 export function requireBelt(id: string): Belt {

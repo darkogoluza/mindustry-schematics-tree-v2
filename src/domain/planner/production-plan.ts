@@ -1,5 +1,5 @@
-import type { Belt, Factory, ItemId, LiquidId } from "./types";
-import { requireBelt } from "./utils/belt-lookup";
+import type { Belt, Factory, ItemId, LiquidId } from "../types";
+import { requireBelt } from "./belt-lookup";
 
 export interface BeltChoice {
   readonly itemId: ItemId;

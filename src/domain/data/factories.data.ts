@@ -120,4 +120,28 @@ export const factories: readonly Factory[] = assertUniqueIds("factory", [
     .inputs(itemFlow("sand")(1), liquidFlow("water")(9))
     .outputs(liquidFlow("oil")(15))
     .build(),
+
+  factory("multi-press")("Multi-Press")(3)
+    .power(108)
+    .craftTime(0.5)
+    .buildCost(cost("graphite")(100), cost("titanium")(50), cost("silicon")(100), cost("thorium")(25))
+    .inputs(itemFlow("coal")(3), liquidFlow("water")(6))
+    .outputs(itemFlow("graphite")(2))
+    .build(),
+
+  factory("silicon-crucible")("Silicon Crucible")(3)
+    .power(240)
+    .craftTime(1.5)
+    .buildCost(cost("metaglass")(80), cost("titanium")(120), cost("silicon")(60), cost("pyratite")(35))
+    .inputs(itemFlow("coal")(4), itemFlow("sand")(6), itemFlow("pyratite")(1))
+    .outputs(itemFlow("silicon")(8))
+    .build(),
+
+  factory("cryofluid-mixer")("Cryofluid Mixer")(2)
+    .power(60)
+    .craftTime(2)
+    .buildCost(cost("titanium")(65), cost("lead")(60), cost("silicon")(40))
+    .inputs(itemFlow("titanium")(1), liquidFlow("water")(12))
+    .outputs(liquidFlow("cryofluid")(12))
+    .build(),
 ]);
