@@ -72,9 +72,11 @@ export function ItemDetail({ entity }: { entity: Item }) {
                   <div className="mb-2">
                     <PermutationCostSummary
                       cost={perm.cost}
+                      score={perm.metrics.score}
                       efficiency={perm.metrics.efficiency}
                       totalArea={perm.metrics.totalArea}
                       drillArea={perm.metrics.drillArea}
+                      outputPerMinute={perm.metrics.outputPerMinute}
                     />
                   </div>
                   <CraftGraphFlow roots={perm.overdriveGraph ? [perm.graph, perm.overdriveGraph] : [perm.graph]} />

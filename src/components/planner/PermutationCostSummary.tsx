@@ -19,23 +19,47 @@ function efficiencyChip(efficiency: number): string {
   return "bg-red-500/20 text-red-700 dark:text-red-300";
 }
 
+/** Same tiering as efficiency, but bolder — this is the headline number. */
+function scoreChip(score: number): string {
+  if (score >= 80) return "bg-emerald-500/25 text-emerald-700 dark:text-emerald-300";
+  if (score >= 50) return "bg-amber-500/25 text-amber-700 dark:text-amber-300";
+  return "bg-red-500/25 text-red-700 dark:text-red-300";
+}
+
 interface PermutationCostSummaryProps {
   cost: CostEstimate;
+  /** 0..100 composite rating — the headline number this design is ranked by. */
+  score: number;
   efficiency: number;
   /** Whole-design floor space: every factory and drill combined. */
   totalArea: number;
   /** Subset of totalArea that's drills specifically (they must sit on the ore patch). */
   drillArea: number;
+  /** Estimated units of the target item carried out per minute, capped at the output belt's throughput. */
+  outputPerMinute: number;
 }
 
 /** Small inline cost chips for a permutation header — reuses the same hue scheme as the graph's stat chips (power=amber, water/liquid=cyan). */
-export function PermutationCostSummary({ cost, efficiency, totalArea, drillArea }: PermutationCostSummaryProps) {
+export function PermutationCostSummary({ cost, score, efficiency, totalArea, drillArea, outputPerMinute }: PermutationCostSummaryProps) {
   const waterDraw = cost.liquidDraw.find((l) => l.liquidId === "water");
   const otherLiquids = cost.liquidDraw.filter((l) => l.liquidId !== "water");
 
   return (
     <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+      <Tooltip>
+        <TooltipTrigger className={cn("rounded px-2 py-0.5 text-xs font-extrabold", scoreChip(score))}>Score {score}</TooltipTrigger>
+        <TooltipContent>
+          Composite 0–100 rating: efficiency and output weigh highest, drill area heavily (locked to the ore patch), power/water moderately, total area
+          lightly, and build-material exoticness (synthesis steps from raw ore) moderately-high.
+        </TooltipContent>
+      </Tooltip>
       <span className={cn("rounded px-1.5 py-0.5 font-bold", efficiencyChip(efficiency))}>Efficiency {Math.round(efficiency * 100)}%</span>
+      <Tooltip>
+        <TooltipTrigger className="rounded bg-indigo-500/20 px-1.5 py-0.5 font-bold text-indigo-700 dark:text-indigo-300">
+          Output {outputPerMinute.toFixed(0)}/min
+        </TooltipTrigger>
+        <TooltipContent>Estimated units of the target item carried out per minute, capped at what one output belt of this type can carry.</TooltipContent>
+      </Tooltip>
       <span className="rounded bg-amber-500/20 px-1.5 py-0.5 font-bold text-amber-700 dark:text-amber-300">Power {cost.powerDraw.toFixed(0)}/s</span>
       <span className="rounded bg-cyan-500/20 px-1.5 py-0.5 font-bold text-cyan-700 dark:text-cyan-300">Water {(waterDraw?.rate ?? 0).toFixed(2)}/s</span>
       {otherLiquids.map((l) => (

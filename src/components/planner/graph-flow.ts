@@ -5,7 +5,7 @@ import type { GraphNode } from "@/domain/planner/craft-permutations";
 export const NODE_WIDTH = 220;
 const NODE_HEIGHT_ESTIMATE = 90;
 const COL_GAP = 40;
-const ROW_GAP = 70;
+const ROW_GAP = 130;
 
 /** React Flow requires node data to be an index-signature record; GraphNode is structurally compatible. */
 export type FlowNodeData = GraphNode & Record<string, unknown>;

@@ -51,7 +51,12 @@ export function GraphFlowNode({ data }: NodeProps<Node<FlowNodeData>>) {
       <Handle type="source" position={Position.Top} className="opacity-0" />
 
       <div className="flex items-center gap-2.5">
-        <EntityIcon icon={data.icon} name={data.label} size={44} />
+        <div className="flex shrink-0 items-center">
+          <EntityIcon icon={data.icon} name={data.label} size={44} />
+          {data.secondaryIcon && (
+            <EntityIcon icon={data.secondaryIcon} name={data.secondaryIconLabel ?? data.label} size={28} className="-ml-2.5 ring-2 ring-card" />
+          )}
+        </div>
         <div className="min-w-0 flex-1 space-y-1">
           <span className="block text-sm leading-tight font-semibold break-words">{data.label}</span>
           <div className="flex flex-wrap items-center gap-1.5">

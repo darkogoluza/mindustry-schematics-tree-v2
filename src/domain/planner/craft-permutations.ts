@@ -9,7 +9,8 @@ import { overdriveVariants, type OverdriveVariant } from "./overdrive-variants";
 import { requireBelt } from "./belt-lookup";
 import { estimateProductionCost } from "../cost-estimate/estimate-production-cost";
 import { estimateMiningCost } from "../cost-estimate/estimate-mining-cost";
-import type { CostEstimate } from "../cost-estimate/shared";
+import { mergeBuildCosts, type CostEstimate, type LiquidDraw } from "../cost-estimate/shared";
+import { materialDepth } from "./material-depth";
 
 export type GraphNodeKind = "item" | "liquid" | "factory" | "drill" | "belt" | "overdrive";
 
@@ -23,6 +24,9 @@ export interface GraphNode {
   readonly label: string;
   readonly kind: GraphNodeKind;
   readonly icon: string;
+  /** A second icon shown alongside the main one — e.g. a belt node shows both the conveyor and the material it carries. */
+  readonly secondaryIcon?: string;
+  readonly secondaryIconLabel?: string;
   readonly stats?: readonly GraphNodeStat[];
   /** Shown on this node's badge, e.g. "raw" for a mined ore. */
   readonly badge?: string;
@@ -49,6 +53,21 @@ export interface CraftPermutationMetrics {
   readonly totalArea: number;
   /** The subset of totalArea that's drills specifically — they must sit on the ore patch, unlike factories which can go anywhere. */
   readonly drillArea: number;
+  /**
+   * Estimated units of the target item actually carried out per minute, capped at what a single
+   * output belt of the scenario's type can carry (regular/titanium; "optimal-mixed" assumes
+   * titanium as an upper bound, since it isn't a single declared belt type). An approximation —
+   * we don't model a literal output-belt topology, just the ceiling one belt imposes.
+   */
+  readonly outputPerMinute: number;
+  /**
+   * 0..100 composite rating of the whole design — higher is better. Weighs efficiency and output
+   * highest, drill area heavily (it's locked to the ore patch, unlike factories), power/water
+   * moderately, total area lightly, and build-material "exoticness" (how many synthesis steps
+   * separate each required material from raw ore — a proxy for how much extra infrastructure the
+   * design implicitly depends on) moderately-high. See computeScore for the exact weights.
+   */
+  readonly score: number;
 }
 
 export interface CraftPermutation {
@@ -131,15 +150,13 @@ function createBuildContext(): BuildContext {
   return { efficiencySamples: [], factoryAreaSamples: [], drillAreaSamples: [] };
 }
 
-/** One way to mine a specific raw item — a (drill, cooling, belt type) combination. */
-interface MiningChoice {
-  readonly option: DrillOption;
-  readonly beltLabel: string;
-  readonly saturation: BeltSaturation;
-}
-
-/** A specific choice of how to mine every raw item reachable in the tree, keyed by item id. */
-type MiningCombo = ReadonlyMap<ItemId, MiningChoice>;
+/**
+ * A specific choice of (drill, cooling) for every raw item reachable in the tree, keyed by item id.
+ * Belt type is deliberately not part of this choice: a raw item is carried from drill to consumer
+ * by one continuous belt, so its type is derived from whichever belt the consuming factory already
+ * chose for that input (see buildRawSupplyNode), not picked independently.
+ */
+type MiningCombo = ReadonlyMap<ItemId, DrillOption>;
 
 const MAX_RECURSION_DEPTH = 8;
 
@@ -166,6 +183,83 @@ function isMineable(id: ItemId): boolean {
 
 function buildCostTotalOf(cost: CostEstimate): number {
   return cost.buildCost.reduce((sum, entry) => sum + entry.amount, 0);
+}
+
+/**
+ * Reference scales used to normalize each raw metric into a 0..1 "goodness" before weighting.
+ * These are fixed engineering estimates (not derived from the live data), since permutations are
+ * generated lazily and can number in the millions — there's no cheap way to normalize against the
+ * true min/max across an entire space without materializing it.
+ */
+const SCORE_REFERENCE = {
+  powerFreeUntil: 500, // power draw below this is basically free — no penalty
+  powerDecay: 150, // past the free threshold, penalty decays quadratically with this as the scale — mild just past 500, very steep by ~800
+  maxWater: 800, // water is cheap/plentiful — a high ceiling means realistic usage barely dents the score
+  drillAreaRef: 70, // hyperbolic reference for drill area — lowered so smaller drill areas are rewarded more sharply, since it means repeating the design twice over in the same ore patch
+  maxTotalArea: 800,
+  maxOutputPerMinute: 600, // = titanium belt (10/s) × 60 — the natural ceiling outputPerMinute is already capped at
+  maxMaterialDepth: 4,
+};
+
+/** How "better" something is, 0..1, for a metric where higher raw values are better (efficiency, output). */
+function higherIsBetter(value: number, max: number): number {
+  return Math.max(0, Math.min(1, value / max));
+}
+
+/** How "better" something is, 0..1, for a metric where lower raw values are better (water, total area). */
+function lowerIsBetter(value: number, max: number): number {
+  return 1 - higherIsBetter(value, max);
+}
+
+/**
+ * Power penalty, exponential past a free threshold: draw under `powerFreeUntil` costs nothing, then
+ * the score decays exponentially so it's still mild around 300 and bites hard further out.
+ */
+function powerScore(power: number): number {
+  if (power <= SCORE_REFERENCE.powerFreeUntil) return 1;
+  const over = power - SCORE_REFERENCE.powerFreeUntil;
+  return Math.exp(-((over / SCORE_REFERENCE.powerDecay) ** 2));
+}
+
+/**
+ * Drill-area score, hyperbolic rather than linear: halving the area lets the same ore patch host the
+ * design twice over, so the value of shrinking it doesn't taper off the way a linear penalty implies.
+ */
+function drillAreaScore(area: number): number {
+  return SCORE_REFERENCE.drillAreaRef / (SCORE_REFERENCE.drillAreaRef + area);
+}
+
+/** Weighted-average synthesis depth of a build-cost basket — how "exotic" the required materials are overall. */
+function averageMaterialDepth(cost: CostEstimate): number {
+  const totalAmount = cost.buildCost.reduce((sum, e) => sum + e.amount, 0);
+  if (totalAmount === 0) return 0;
+  const weightedDepth = cost.buildCost.reduce((sum, e) => sum + materialDepth(e.item) * e.amount, 0);
+  return weightedDepth / totalAmount;
+}
+
+const SCORE_WEIGHTS = {
+  efficiency: 0.15,
+  output: 0.25, // matters a lot — bumped up
+  power: 0.15, // expensive — bumped up
+  water: 0.03, // cheap — knocked down
+  drillArea: 0.3, // expensive, scarce real estate — bumped above power, smaller is rewarded harder
+  totalArea: 0.02,
+  material: 0.1,
+} as const;
+
+function computeScore(cost: CostEstimate, efficiency: number, outputPerMinute: number, totalArea: number, drillArea: number): number {
+  const water = cost.liquidDraw.find((l) => l.liquidId === "water")?.rate ?? 0;
+
+  const weighted =
+    SCORE_WEIGHTS.efficiency * efficiency +
+    SCORE_WEIGHTS.output * higherIsBetter(outputPerMinute, SCORE_REFERENCE.maxOutputPerMinute) +
+    SCORE_WEIGHTS.power * powerScore(cost.powerDraw) +
+    SCORE_WEIGHTS.water * lowerIsBetter(water, SCORE_REFERENCE.maxWater) +
+    SCORE_WEIGHTS.drillArea * drillAreaScore(drillArea) +
+    SCORE_WEIGHTS.totalArea * lowerIsBetter(totalArea, SCORE_REFERENCE.maxTotalArea) +
+    SCORE_WEIGHTS.material * lowerIsBetter(averageMaterialDepth(cost), SCORE_REFERENCE.maxMaterialDepth);
+
+  return Math.round(weighted * 100);
 }
 
 /** 1 when there's nothing to measure (e.g. a factory with no belt-carried inputs at all). */
@@ -206,6 +300,42 @@ function requireDrill(id: string) {
   return drill;
 }
 
+/** Sums liquid-draw lists together, consolidating duplicate liquids into one entry. */
+function mergeLiquidDraws(draws: readonly (readonly LiquidDraw[])[]): readonly LiquidDraw[] {
+  const totals = new Map<LiquidId, number>();
+  for (const list of draws) {
+    for (const entry of list) totals.set(entry.liquidId, (totals.get(entry.liquidId) ?? 0) + entry.rate);
+  }
+  return [...totals.entries()].map(([liquidId, rate]) => ({ liquidId, rate }));
+}
+
+/**
+ * Power/liquid/build cost of mining one raw item for a factory permutation — the drills and the
+ * belt actually feeding the chosen combo, with count already saturated against that belt. Doesn't
+ * include overdrive cost: the permutation's single overdrive targets the top factory, not these
+ * feeder drills.
+ */
+function rawSupplyCost(rawItemId: ItemId, combo: MiningCombo, scenario: BeltScenario): CostEstimate {
+  const chosen = scenario.belts.find((b) => b.itemId === rawItemId);
+  const option = combo.get(rawItemId);
+  if (!chosen || !option) return { powerDraw: 0, liquidDraw: [], buildCost: [] };
+
+  const saturation = chosen.beltId === option.regularBelt.beltId ? option.regularBelt : option.titaniumBelt;
+  const drill = requireDrill(option.drillId);
+  const belt = requireBelt(chosen.beltId);
+
+  const liquidDraw: readonly LiquidDraw[] =
+    option.cooling.active && option.cooling.boostResourceId && option.cooling.boostConsumptionRate
+      ? [{ liquidId: option.cooling.boostResourceId as LiquidId, rate: option.cooling.boostConsumptionRate * saturation.drillsNeeded }]
+      : [];
+
+  return {
+    powerDraw: drill.power * saturation.drillsNeeded,
+    liquidDraw,
+    buildCost: mergeBuildCosts([...Array(saturation.drillsNeeded).fill(drill.buildCost), belt.buildCost]),
+  };
+}
+
 /**
  * Recursively finds every raw, mineable item reachable from `id` — i.e. every ore that some
  * ingredient chain bottoms out at. These are exactly the items that need their own mining
@@ -223,26 +353,24 @@ function collectRawItemIds(id: ItemId | LiquidId, found: Set<ItemId>, depth: num
   for (const input of producer.inputs) collectRawItemIds(input.id, found, depth + 1);
 }
 
-/** Every (drill × cooling × belt type) way to mine one raw item. */
-function miningChoicesFor(id: ItemId): MiningChoice[] {
-  const plan = planMining(id, 1);
-  const choices: MiningChoice[] = [];
-  for (const option of plan.options) {
-    choices.push({ option, beltLabel: "regular conveyor", saturation: option.regularBelt });
-    choices.push({ option, beltLabel: "titanium conveyor", saturation: option.titaniumBelt });
-  }
-  return choices;
+/** Every (drill × cooling) way to mine one raw item — belt type is derived at the point of use, not chosen here. */
+function miningChoicesFor(id: ItemId): DrillOption[] {
+  return [...planMining(id, 1).options];
 }
 
 function comboLabel(combo: MiningCombo): string {
   if (combo.size === 0) return "";
-  return [...combo.entries()]
-    .map(([id, choice]) => `${entityLabel(id)}: ${choice.option.drillName}${coolingSuffix(choice.option)} · ${choice.beltLabel}`)
-    .join(", ");
+  return [...combo.entries()].map(([id, option]) => `${entityLabel(id)}: ${option.drillName}${coolingSuffix(option)}`).join(", ");
 }
 
 function comboKey(combo: MiningCombo): string {
-  return [...combo.entries()].map(([id, c]) => `${id}=${c.option.drillId}:${c.option.cooling.active}:${c.beltLabel}`).join("|");
+  return [...combo.entries()].map(([id, option]) => `${id}=${option.drillId}:${option.cooling.active}`).join("|");
+}
+
+/** Max drills (and resulting throughput) a belt of `beltThroughput` can carry at `perDrillRate` each. */
+function saturateAgainstBelt(beltThroughput: number, perDrillRate: number): { drillsNeeded: number; achievedRate: number } {
+  const drillsNeeded = Math.max(1, Math.floor(beltThroughput / perDrillRate));
+  return { drillsNeeded, achievedRate: Math.min(drillsNeeded * perDrillRate, beltThroughput) };
 }
 
 /**
@@ -282,8 +410,19 @@ function beltNode(beltId: string, producedRate: number, beltThroughput: number, 
   };
 }
 
-/** Builds a drill node (and its optional cooling-liquid child) for one mining choice, tracking its ore-patch area. */
-function buildDrillNode(option: DrillOption, saturation: BeltSaturation, ctx: BuildContext): GraphNode {
+/**
+ * Builds the full drill-to-consumer supply for one raw item as a *single* belt — a raw material is
+ * carried by one continuous conveyor from the ore patch to whatever needs it, so the belt here is
+ * whichever one `beltId`/`beltThroughput` the consumer already chose (not a second, independently
+ * picked belt). The belt node shows the material it carries instead of being a bare belt + a
+ * separate raw-item node, since otherwise the drill count would be matched against a different
+ * belt than the one actually feeding the consumer — i.e. the belt-mismatch bug this fixes.
+ */
+function buildRawSupplyNode(rawItemId: ItemId, option: DrillOption, beltId: string, beltThroughput: number, ctx: BuildContext): GraphNode {
+  const { drillsNeeded, achievedRate } = saturateAgainstBelt(beltThroughput, option.cooling.perDrillRate);
+  const rawProducedRate = option.cooling.perDrillRate * drillsNeeded;
+  ctx.efficiencySamples.push(Math.min(rawProducedRate, beltThroughput) / Math.max(rawProducedRate, beltThroughput));
+
   const drillChildren: GraphNode[] = [];
   if (option.cooling.active && option.cooling.boostResourceId && option.cooling.boostConsumptionRate) {
     drillChildren.push({
@@ -296,27 +435,43 @@ function buildDrillNode(option: DrillOption, saturation: BeltSaturation, ctx: Bu
   }
 
   const drill = requireDrill(option.drillId);
-  ctx.drillAreaSamples.push(drill.size * drill.size * saturation.drillsNeeded);
+  ctx.drillAreaSamples.push(drill.size * drill.size * drillsNeeded);
 
-  return {
+  const drillNode: GraphNode = {
     id: option.drillId,
     label: option.drillName,
     kind: "drill",
     icon: entityIcon(option.drillId),
     stats: [
       areaStat(drill.size),
-      { label: "Count", value: `${saturation.drillsNeeded}x` },
+      { label: "Count", value: `${drillsNeeded}x` },
       { label: "Rate", value: `${option.cooling.perDrillRate.toFixed(2)}/s each` },
     ],
     children: drillChildren.length > 0 ? drillChildren : undefined,
+  };
+
+  const belt = requireBelt(beltId);
+  return {
+    id: belt.id,
+    label: belt.name,
+    kind: "belt",
+    icon: belt.icon,
+    secondaryIcon: entityIcon(rawItemId),
+    secondaryIconLabel: entityLabel(rawItemId),
+    stats: [
+      { label: "Carries", value: entityLabel(rawItemId) },
+      { label: "Rate", value: `${achievedRate.toFixed(2)}/s` },
+    ],
+    children: [drillNode],
   };
 }
 
 /**
  * Recursively builds the default (no overdrive, optimal-mixed) production sub-tree for one
  * item/liquid — used for every ingredient below the top permutation node, since only the
- * clicked item's own production gets varied across permutations. Raw items branch into the
- * mining choice selected for them in `combo` instead of terminating as a flat "raw" leaf.
+ * clicked item's own production gets varied across permutations. Dead ends (no producer) are
+ * either raw ore (flagged with a badge) or, for items, routed through buildRawSupplyNode by the
+ * caller before ever reaching here — see buildFactoryNode.
  */
 function buildResourceNode(id: ItemId | LiquidId, edgeLabel: string | undefined, depth: number, ctx: BuildContext, combo: MiningCombo): GraphNode {
   const base = { id, label: entityLabel(id), kind: entityKind(id), icon: entityIcon(id), edgeLabel };
@@ -325,12 +480,6 @@ function buildResourceNode(id: ItemId | LiquidId, edgeLabel: string | undefined,
 
   const producer = factories.find((f) => f.outputs.some((o) => o.id === id));
   if (!producer) {
-    const choice = entityKind(id) === "item" ? combo.get(id as ItemId) : undefined;
-    if (choice) {
-      const drillNode = buildDrillNode(choice.option, choice.saturation, ctx);
-      const rawProducedRate = choice.option.cooling.perDrillRate * choice.saturation.drillsNeeded;
-      return { ...base, children: [beltNode(choice.saturation.beltId, rawProducedRate, choice.saturation.beltThroughput, drillNode, ctx)] };
-    }
     return { ...base, badge: isRawItem(id) ? "raw" : undefined };
   }
 
@@ -351,8 +500,13 @@ function buildFactoryNode(
   const children = factory.inputs.map((input) => {
     if (input.type === "item") {
       const chosen = scenario.belts.find((b) => b.itemId === input.id);
-      const itemNode = buildResourceNode(input.id, chosen ? undefined : `×${input.amount}`, depth + (chosen ? 2 : 1), ctx, combo);
-      return chosen ? beltNode(chosen.beltId, chosen.perFactoryRate, chosen.beltThroughput, itemNode, ctx) : itemNode;
+      if (!chosen) return buildResourceNode(input.id, `×${input.amount}`, depth + 1, ctx, combo);
+
+      const drillOption = combo.get(input.id);
+      if (drillOption) return buildRawSupplyNode(input.id, drillOption, chosen.beltId, chosen.beltThroughput, ctx);
+
+      const itemNode = buildResourceNode(input.id, undefined, depth + 2, ctx, combo);
+      return beltNode(chosen.beltId, chosen.perFactoryRate, chosen.beltThroughput, itemNode, ctx);
     }
     return buildResourceNode(input.id, `${input.rate}/s${input.perTile ? " per tile" : ""} (pipe)`, depth + 1, ctx, combo);
   });
@@ -381,15 +535,12 @@ function rootFactoryGraph(itemId: ItemId, factory: Factory, scenario: BeltScenar
 }
 
 function rootDrillGraph(itemId: ItemId, option: DrillOption, saturation: BeltSaturation, ctx: BuildContext): GraphNode {
-  const drillNode = buildDrillNode(option, saturation, ctx);
-  const rawProducedRate = option.cooling.perDrillRate * saturation.drillsNeeded;
-
   return {
     id: itemId,
     label: entityLabel(itemId),
     kind: "item",
     icon: entityIcon(itemId),
-    children: [beltNode(saturation.beltId, rawProducedRate, saturation.beltThroughput, drillNode, ctx)],
+    children: [buildRawSupplyNode(itemId, option, saturation.beltId, saturation.beltThroughput, ctx)],
   };
 }
 
@@ -432,6 +583,12 @@ function scenarioBeltLabel(scenarioLabel: string): string | undefined {
   return undefined; // "optimal-mixed" isn't a single belt type, excluded whenever a belt filter is active
 }
 
+/** The output belt's throughput ceiling for a scenario — titanium (the faster option) for "optimal-mixed" since it isn't a single declared belt type. */
+function outputBeltThroughputFor(scenarioLabel: string): number {
+  if (scenarioLabel === "all-regular conveyor") return requireBelt("conveyor").moveSpeed;
+  return requireBelt("titanium-conveyor").moveSpeed;
+}
+
 /** Shared per-item setup so count/page queries don't redo this work and never materialize the full combination space. */
 interface PermutationSpace {
   readonly producer: Factory | undefined;
@@ -439,7 +596,7 @@ interface PermutationSpace {
   /** Factory branch only: the (filtered) scenario list and one (filtered) choice-list per raw item reachable in the tree. */
   readonly scenarios: readonly (typeof FACTORY_SCENARIOS)[number][];
   readonly rawItemIds: readonly ItemId[];
-  readonly choiceLists: readonly MiningChoice[][];
+  readonly choiceLists: readonly DrillOption[][];
   /** Drill branch only: every (filtered) option for the clicked item itself, and the (filtered) belt labels available. */
   readonly drillOptions: readonly DrillOption[];
   readonly beltChoices: readonly string[];
@@ -455,9 +612,7 @@ function buildPermutationSpace(itemId: ItemId, filters: CraftFilters | undefined
     const rawIds = new Set<ItemId>();
     collectRawItemIds(itemId, rawIds, 0);
     const rawItemIds = [...rawIds];
-    const choiceLists = rawItemIds.map((id) =>
-      miningChoicesFor(id).filter((c) => passesSet(c.beltLabel, filters?.beltLabels) && passesSet(c.option.drillId, filters?.drillIds)),
-    );
+    const choiceLists = rawItemIds.map((id) => miningChoicesFor(id).filter((option) => passesSet(option.drillId, filters?.drillIds)));
     const scenarios = FACTORY_SCENARIOS.filter(([label]) => {
       const belt = scenarioBeltLabel(label);
       return belt ? passesSet(belt, filters?.beltLabels) : !filters?.beltLabels || filters.beltLabels.size === 0;
@@ -493,9 +648,20 @@ function buildPermutationAt(itemId: ItemId, space: PermutationSpace, index: numb
     const overdriveGraph = buildOverdriveGraph(variant);
     const scenario = pick(plan);
     const outputRate = outputRatesAt(space.producer, scenario.factoryCount, variant.speedMultiplier).find((o) => o.id === itemId)?.rate ?? 0;
-    const cost = estimateProductionCost(space.producer, plan, scenario, variant);
+    const productionCost = estimateProductionCost(space.producer, plan, scenario, variant);
+    const miningCosts = space.rawItemIds.map((id) => rawSupplyCost(id, combo, scenario));
+    const cost: CostEstimate = {
+      powerDraw: productionCost.powerDraw + sumOf(miningCosts.map((m) => m.powerDraw)),
+      liquidDraw: mergeLiquidDraws([productionCost.liquidDraw, ...miningCosts.map((m) => m.liquidDraw)]),
+      buildCost: mergeBuildCosts([productionCost.buildCost, ...miningCosts.map((m) => m.buildCost)]),
+    };
     const ctx = createBuildContext();
     const graph = rootFactoryGraph(itemId, space.producer, scenario, outputRate, ctx, combo);
+    const outputPerMinute = Math.min(outputRate, outputBeltThroughputFor(scenarioLabel)) * 60;
+
+    const efficiency = averageOf(ctx.efficiencySamples);
+    const totalArea = sumOf(ctx.factoryAreaSamples) + sumOf(ctx.drillAreaSamples);
+    const drillArea = sumOf(ctx.drillAreaSamples);
 
     return {
       id: `${variant.label}:${scenarioLabel}:${comboKey(combo)}`,
@@ -509,9 +675,11 @@ function buildPermutationAt(itemId: ItemId, space: PermutationSpace, index: numb
         powerDraw: cost.powerDraw,
         buildCostTotal: buildCostTotalOf(cost),
         beltsUsed: scenario.belts.length,
-        efficiency: averageOf(ctx.efficiencySamples),
-        totalArea: sumOf(ctx.factoryAreaSamples) + sumOf(ctx.drillAreaSamples),
-        drillArea: sumOf(ctx.drillAreaSamples),
+        efficiency,
+        totalArea,
+        drillArea,
+        outputPerMinute,
+        score: computeScore(cost, efficiency, outputPerMinute, totalArea, drillArea),
       },
     };
   }
@@ -527,6 +695,12 @@ function buildPermutationAt(itemId: ItemId, space: PermutationSpace, index: numb
   const ctx = createBuildContext();
   const graph = rootDrillGraph(itemId, option, saturation, ctx);
 
+  const drillEfficiency = averageOf(ctx.efficiencySamples);
+  const drillTotalArea = sumOf(ctx.factoryAreaSamples) + sumOf(ctx.drillAreaSamples);
+  const drillAreaTotal = sumOf(ctx.drillAreaSamples);
+  // saturation.achievedRate is already capped at this belt's throughput, so no further capping needed.
+  const drillOutputPerMinute = saturation.achievedRate * 60;
+
   return {
     id: `${variant.label}:${option.drillId}:${option.cooling.active}:${beltLabel}`,
     label: joinLabel(variant.label, `${option.drillName}${coolingSuffix(option)} · ${beltLabel}`),
@@ -539,9 +713,11 @@ function buildPermutationAt(itemId: ItemId, space: PermutationSpace, index: numb
       powerDraw: cost.powerDraw,
       buildCostTotal: buildCostTotalOf(cost),
       beltsUsed: 1,
-      efficiency: averageOf(ctx.efficiencySamples),
-      totalArea: sumOf(ctx.factoryAreaSamples) + sumOf(ctx.drillAreaSamples),
-      drillArea: sumOf(ctx.drillAreaSamples),
+      efficiency: drillEfficiency,
+      totalArea: drillTotalArea,
+      drillArea: drillAreaTotal,
+      outputPerMinute: drillOutputPerMinute,
+      score: computeScore(cost, drillEfficiency, drillOutputPerMinute, drillTotalArea, drillAreaTotal),
     },
   };
 }
@@ -557,44 +733,30 @@ export function getCraftPermutationCount(itemId: ItemId, filters?: CraftFilters)
 }
 
 /**
- * One page of permutations for `itemId` matching `filters`. Structural filters (overdrive/belt/drill)
- * shrink the addressable space itself, so they cost nothing extra. Range filters (power/water/
- * efficiency) can only be checked after building a candidate, so that case lazily scans forward
- * from the start, skipping non-matches, capped at RANGE_SCAN_CAP candidates so a rare filter
- * combination can't hang the UI thread — `hasMore` reflects whether the cap was hit before filling
- * the page, in which case the result may be incomplete.
+ * One page of permutations for `itemId` matching `filters`, ranked by score (highest first).
+ * Ranking requires examining candidates (score can't be known without building them), so this
+ * scans forward from the start of the structurally-filtered space, capped at RANGE_SCAN_CAP
+ * candidates — cheap and exact whenever the space fits under the cap, and a deterministic
+ * best-effort (ranked among the first N candidates in index order, not the true global best)
+ * when it doesn't. `totalCount` is only exact when the scan covered the entire space.
  */
 export function getCraftPermutationsPage(itemId: ItemId, pageIndex: number, pageSize: number, filters?: CraftFilters): CraftPermutationPage {
   const space = buildPermutationSpace(itemId, filters);
+  const scanLimit = Math.min(space.totalCount, RANGE_SCAN_CAP);
+  const scannedEverything = space.totalCount <= RANGE_SCAN_CAP;
 
-  if (!hasRangeFilters(filters)) {
-    const start = Math.max(0, pageIndex) * pageSize;
-    const end = Math.min(space.totalCount, start + pageSize);
-    const items: CraftPermutation[] = [];
-    for (let i = start; i < end; i++) items.push(buildPermutationAt(itemId, space, i));
-    return { items, totalCount: space.totalCount, hasMore: end < space.totalCount };
-  }
-
-  const targetSkip = Math.max(0, pageIndex) * pageSize;
-  const items: CraftPermutation[] = [];
-  let matched = 0;
-  let scanned = 0;
-  let i = 0;
-  for (; i < space.totalCount && scanned < RANGE_SCAN_CAP; i++, scanned++) {
+  const matches: CraftPermutation[] = [];
+  for (let i = 0; i < scanLimit; i++) {
     const candidate = buildPermutationAt(itemId, space, i);
-    if (!passesRangeFilters(candidate, filters)) continue;
-    if (matched >= targetSkip && items.length < pageSize) items.push(candidate);
-    matched++;
-    if (items.length >= pageSize) {
-      // Peek for at least one more match to know if there's a next page, without an unbounded extra scan.
-      for (i++; i < space.totalCount && scanned < RANGE_SCAN_CAP; i++, scanned++) {
-        if (passesRangeFilters(buildPermutationAt(itemId, space, i), filters)) return { items, totalCount: undefined, hasMore: true };
-      }
-      break;
-    }
+    if (passesRangeFilters(candidate, filters)) matches.push(candidate);
   }
+  matches.sort((a, b) => b.metrics.score - a.metrics.score);
 
-  return { items, totalCount: undefined, hasMore: false };
+  const start = Math.max(0, pageIndex) * pageSize;
+  const items = matches.slice(start, start + pageSize);
+  const hasMore = start + pageSize < matches.length;
+
+  return { items, totalCount: scannedEverything ? matches.length : undefined, hasMore };
 }
 
 export type { OverdriveVariant };
