@@ -9,7 +9,7 @@ function itemName(id: string): string {
 }
 
 function itemIcon(id: string): string {
-  return findCatalogEntity(id)?.icon ?? `/icons/${id}.png`;
+  return findCatalogEntity(id)?.icon ?? `${import.meta.env.BASE_URL}icons/${id}.png`;
 }
 
 /** Green when belts are well-matched to what's produced, amber/red the further off (overflow waste or idle belt capacity) it gets. */
